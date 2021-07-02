@@ -89,7 +89,10 @@ impl<T> ThreadSafe<T> {
         if self.origin_thread == key.id() {
             // SAFETY: "inner" can be used since we are in the origin thread
             //         we can take() because we delete the original right after
-            Ok(unsafe { ManuallyDrop::take(&mut self.inner) })
+            let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+            // SAFETY: suppress the dropper on this object
+            mem::forget(self);
+            Ok(inner)
         } else {
             Err(self)
         }
