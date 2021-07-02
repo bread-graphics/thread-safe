@@ -11,6 +11,48 @@
 //!
 //! The `ThreadKey` is a wrapper around `ThreadId`, but `!Send`. This allows one to certify that the current
 //! thread has the given `ThreadId`, without having to go through `thread::current().id()`.
+//! 
+//! # Example
+//! 
+//! ```
+//! use std::{cell::Cell, sync::{Arc, atomic}, thread};
+//! use thread_safe::ThreadSafe;
+//! 
+//! #[derive(Debug)]
+//! struct InnerData {
+//!     counter: atomic::AtomicUsize,
+//!     other_counter: ThreadSafe<Cell<usize>>,
+//! }
+//! 
+//! fn increment_data(data: &InnerData) {
+//!     data.counter.fetch_add(1, atomic::Ordering::SeqCst);
+//!     if let Ok(counter) = data.other_counter.try_get_ref() {
+//!         counter.set(counter.get() + 1);
+//!     }
+//! }
+//! 
+//! let data = Arc::new(InnerData {
+//!     counter: atomic::AtomicUsize::new(0),
+//!     other_counter: ThreadSafe::new(Cell::new(0)),
+//! });
+//! 
+//! let mut handles = vec![];
+//! 
+//! for _ in 0..10 {
+//!     let data = data.clone();
+//!     handles.push(thread::spawn(move || increment_data(&data)));
+//! }
+//! 
+//! increment_data(&data);
+//! 
+//! for handle in handles {
+//!     handle.join().unwrap();
+//! }
+//! 
+//! let data = Arc::try_unwrap(data).unwrap();
+//! assert_eq!(data.counter.load(atomic::Ordering::Relaxed), 11);
+//! assert_eq!(data.other_counter.get_ref().get(), 1);
+//! ```
 
 use std::{
     error::Error,
@@ -68,6 +110,13 @@ unsafe impl<T> Sync for ThreadSafe<T> {}
 
 impl<T> ThreadSafe<T> {
     /// Create a new instance of a `ThreadSafe`.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use thread_safe::ThreadSafe;
+    /// let t = ThreadSafe::new(0i32);
+    /// ```
     #[inline]
     pub fn new(inner: T) -> ThreadSafe<T> {
         ThreadSafe {
@@ -78,6 +127,22 @@ impl<T> ThreadSafe<T> {
     }
 
     /// Attempt to convert to the inner type. This errors if it is not in the origin thread.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use std::{thread, sync::Arc};
+    /// use thread_safe::ThreadSafe;
+    /// 
+    /// let t = ThreadSafe::new(0i32);
+    /// 
+    /// let t = thread::spawn(move || match t.try_into_inner() {
+    ///     Ok(_) => panic!(),
+    ///     Err(t) => t,
+    /// }).join().unwrap();
+    /// 
+    /// t.try_into_inner().unwrap();
+    /// ```
     #[inline]
     pub fn try_into_inner(self) -> Result<T, ThreadSafe<T>> {
         self.try_into_inner_with_key(ThreadKey::get())
