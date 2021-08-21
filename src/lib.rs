@@ -11,44 +11,44 @@
 //!
 //! The `ThreadKey` is a wrapper around `ThreadId`, but `!Send`. This allows one to certify that the current
 //! thread has the given `ThreadId`, without having to go through `thread::current().id()`.
-//! 
+//!
 //! # Example
-//! 
+//!
 //! ```
 //! use std::{cell::Cell, sync::{Arc, atomic}, thread};
 //! use thread_safe::ThreadSafe;
-//! 
+//!
 //! #[derive(Debug)]
 //! struct InnerData {
 //!     counter: atomic::AtomicUsize,
 //!     other_counter: ThreadSafe<Cell<usize>>,
 //! }
-//! 
+//!
 //! fn increment_data(data: &InnerData) {
 //!     data.counter.fetch_add(1, atomic::Ordering::SeqCst);
 //!     if let Ok(counter) = data.other_counter.try_get_ref() {
 //!         counter.set(counter.get() + 1);
 //!     }
 //! }
-//! 
+//!
 //! let data = Arc::new(InnerData {
 //!     counter: atomic::AtomicUsize::new(0),
 //!     other_counter: ThreadSafe::new(Cell::new(0)),
 //! });
-//! 
+//!
 //! let mut handles = vec![];
-//! 
+//!
 //! for _ in 0..10 {
 //!     let data = data.clone();
 //!     handles.push(thread::spawn(move || increment_data(&data)));
 //! }
-//! 
+//!
 //! increment_data(&data);
-//! 
+//!
 //! for handle in handles {
 //!     handle.join().unwrap();
 //! }
-//! 
+//!
 //! let data = Arc::try_unwrap(data).unwrap();
 //! assert_eq!(data.counter.load(atomic::Ordering::Relaxed), 11);
 //! assert_eq!(data.other_counter.get_ref().get(), 1);
@@ -59,7 +59,9 @@ use std::{
     fmt,
     marker::PhantomData,
     mem::{self, ManuallyDrop},
+    rc::Rc,
     thread::{self, ThreadId},
+    thread_local,
 };
 
 /// The whole point.
@@ -110,9 +112,9 @@ unsafe impl<T> Sync for ThreadSafe<T> {}
 
 impl<T> ThreadSafe<T> {
     /// Create a new instance of a `ThreadSafe`.
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```
     /// use thread_safe::ThreadSafe;
     /// let t = ThreadSafe::new(0i32);
@@ -127,20 +129,20 @@ impl<T> ThreadSafe<T> {
     }
 
     /// Attempt to convert to the inner type. This errors if it is not in the origin thread.
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```
     /// use std::{thread, sync::Arc};
     /// use thread_safe::ThreadSafe;
-    /// 
+    ///
     /// let t = ThreadSafe::new(0i32);
-    /// 
+    ///
     /// let t = thread::spawn(move || match t.try_into_inner() {
     ///     Ok(_) => panic!(),
     ///     Err(t) => t,
     /// }).join().unwrap();
-    /// 
+    ///
     /// t.try_into_inner().unwrap();
     /// ```
     #[inline]
@@ -179,6 +181,18 @@ impl<T> ThreadSafe<T> {
             Ok(i) => i,
             Err(_) => panic!("Attempted to use a ThreadSafe outside of its origin thread"),
         }
+    }
+
+    /// Get the inner object.
+    ///
+    /// # Safety
+    ///
+    /// Behavior is undefined if this is not called in the object's origin thread and the object is `!Send`.
+    #[inline]
+    pub unsafe fn into_inner_unchecked(mut self) -> T {
+        let inner = ManuallyDrop::take(&mut self.inner);
+        mem::forget(self);
+        inner
     }
 }
 
@@ -223,6 +237,16 @@ impl<T: ?Sized> ThreadSafe<T> {
         }
     }
 
+    /// Get a reference to the inner type without checking for thread safety.
+    ///
+    /// # Safety
+    ///
+    /// Behavior is undefined if this is not called in the origin thread and if `T` is `!Sync`.
+    #[inline]
+    pub unsafe fn get_ref_unchecked(&self) -> &T {
+        &self.inner
+    }
+
     /// Try to get a mutable reference to the inner type. This errors if it is not in the origin thread.
     #[inline]
     pub fn try_get_mut(&mut self) -> Result<&mut T, NotInOriginThread> {
@@ -261,6 +285,16 @@ impl<T: ?Sized> ThreadSafe<T> {
                 panic!("Attempted to use a ThreadSafe outside of its origin thread")
             }
         }
+    }
+
+    /// Get a mutable reference to the inner type without checking for thread safety.
+    ///
+    /// # Safety
+    ///
+    /// Behavior is undefined if this is not called in the origin thread and if `T` is `!Send`.
+    #[inline]
+    pub unsafe fn get_mut_unchecked(&mut self) -> &mut T {
+        &mut self.inner
     }
 }
 
@@ -323,7 +357,7 @@ impl<T: ?Sized> Drop for ThreadSafe<T> {
 pub struct ThreadKey {
     id: ThreadId,
     // ensure this is !Send and !Sync
-    _phantom: PhantomData<*const ThreadId>,
+    _phantom: PhantomData<Rc<ThreadId>>,
 }
 
 impl Default for ThreadKey {
@@ -337,8 +371,14 @@ impl ThreadKey {
     /// Create a new `ThreadKey` based on the current thread.
     #[inline]
     pub fn get() -> Self {
+        thread_local! {
+            static ID: ThreadId = thread::current().id();
+        }
+
         Self {
-            id: thread::current().id(),
+            id: ID
+                .try_with(|&id| id)
+                .unwrap_or_else(|_| thread::current().id()),
             _phantom: PhantomData,
         }
     }
